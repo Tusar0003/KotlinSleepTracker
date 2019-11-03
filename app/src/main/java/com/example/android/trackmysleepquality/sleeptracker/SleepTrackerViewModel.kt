@@ -18,7 +18,12 @@ package com.example.android.trackmysleepquality.sleeptracker
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.MutableLiveData
+import androidx.lifecycle.Transformations
 import com.example.android.trackmysleepquality.database.SleepDatabaseDao
+import com.example.android.trackmysleepquality.database.SleepNight
+import com.example.android.trackmysleepquality.formatNights
+import kotlinx.coroutines.*
 
 /**
  * ViewModel for SleepTrackerFragment.
@@ -26,5 +31,110 @@ import com.example.android.trackmysleepquality.database.SleepDatabaseDao
 class SleepTrackerViewModel(
         val database: SleepDatabaseDao,
         application: Application) : AndroidViewModel(application) {
+
+    /**
+     * this viewModelJob allows us to cancel all coroutines provided by this viewModel
+     * when the viewModel is no longer used or destroyed so that we don't end with coroutine that
+     * have nowhere to return to
+     */
+    private var viewModelJob = Job()
+
+    /**
+     * Dispatchers.Main means coroutines launch in the ui scope will run on the main thread
+     */
+    private var uiScope = CoroutineScope(Dispatchers.Main + viewModelJob)
+
+    // It's MutableLiveData, so that we can change it
+    private var tonight = MutableLiveData<SleepNight?>()
+
+    private val nights = database.getAllNights()
+
+    /**
+     * Transformations map is executed every time nights receive new data from the database
+     */
+    val nightsString = Transformations.map(nights) {nights ->
+        formatNights(nights, application.resources)
+    }
+
+    init {
+        initializeTonight()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        viewModelJob.cancel()
+    }
+
+    private fun initializeTonight() {
+        /**
+         * In uiScope we launch a coroutine
+         * Launching a coroutine creates a coroutine without blocking the current thread in the
+         * context they find by the scope
+         */
+        uiScope.launch {
+            tonight.value = getTonightFromDatabase()
+        }
+    }
+
+    /**
+     * We mark it as suspend because we want to call it from inside the coroutine and not block
+     * and we return the SleepNight or null
+     */
+    private suspend fun getTonightFromDatabase() : SleepNight? {
+        return withContext(Dispatchers.IO) {
+            var night = database.getTonight()
+
+            if (night?.startTimeMilli != night?.endTimeMilli) {
+                night = null
+            }
+
+            night
+        }
+    }
+
+    fun onStartTracking() {
+        uiScope.launch {
+            val newNight = SleepNight()
+
+            insert(newNight)
+
+            tonight.value = getTonightFromDatabase()
+        }
+    }
+
+    private suspend fun insert(night: SleepNight) {
+        withContext(Dispatchers.IO) {
+            database.insert(night)
+        }
+    }
+
+    fun onStopTracking() {
+        uiScope.launch {
+            val oldNight = tonight.value ?: return@launch
+
+            oldNight.endTimeMilli = System.currentTimeMillis()
+
+            update(oldNight)
+        }
+    }
+
+    private suspend fun update(night: SleepNight) {
+        withContext(Dispatchers.IO) {
+            database.update(night)
+        }
+    }
+
+    fun onClear() {
+        uiScope.launch {
+            clear()
+            tonight.value = null
+        }
+    }
+
+    private suspend fun clear() {
+        withContext(Dispatchers.IO) {
+            database.clear()
+        }
+    }
 }
 
